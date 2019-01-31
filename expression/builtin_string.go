@@ -2907,6 +2907,97 @@ func (c *formatFunctionClass) getFunction(ctx sessionctx.Context, args []Express
 	return sig, nil
 }
 
+// formatMaxDecimals limits the maximum number of decimal digits for result of
+// function `format`, this value is same as `FORMAT_MAX_DECIMALS` in MySQL source code.
+const formatMaxDecimals int64 = 30
+
+// evalNumDecArgsForFormat evaluates first 2 arguments, i.e, x and d, for function `format`.
+func evalNumDecArgsForFormat(f builtinFunc, row types.Row) (string, string, bool, error) {
+	var xStr string
+	arg0, arg1 := f.getArgs()[0], f.getArgs()[1]
+	ctx := f.getCtx()
+	if arg0.GetType().EvalType() == types.ETDecimal {
+		x, isNull, err := arg0.EvalDecimal(ctx, row)
+		if isNull || err != nil {
+			return "", "", isNull, err
+		}
+		xStr = x.String()
+	} else {
+		x, isNull, err := arg0.EvalReal(ctx, row)
+		if isNull || err != nil {
+			return "", "", isNull, err
+		}
+		xStr = strconv.FormatFloat(x, 'f', -1, 64)
+	}
+	d, isNull, err := arg1.EvalInt(ctx, row)
+	if isNull || err != nil {
+		return "", "", isNull, err
+	}
+	if d < 0 {
+		d = 0
+	} else if d > formatMaxDecimals {
+		d = formatMaxDecimals
+	}
+	xStr = roundFormatArgs(xStr, int(d))
+	dStr := strconv.FormatInt(d, 10)
+	return xStr, dStr, false, nil
+}
+
+func roundFormatArgs(xStr string, maxNumDecimals int) string {
+	if !strings.Contains(xStr, ".") {
+		return xStr
+	}
+
+	sign := false
+	// xStr cannot have '+' prefix now.
+	// It is built in `evalNumDecArgsFormat` after evaluating `Evalxxx` method.
+	if strings.HasPrefix(xStr, "-") {
+		xStr = strings.Trim(xStr, "-")
+		sign = true
+	}
+
+	xArr := strings.Split(xStr, ".")
+	integerPart := xArr[0]
+	decimalPart := xArr[1]
+
+	if len(decimalPart) > maxNumDecimals {
+		t := []byte(decimalPart)
+		carry := false
+		if t[maxNumDecimals] >= '5' {
+			carry = true
+		}
+		for i := maxNumDecimals - 1; i >= 0 && carry; i-- {
+			if t[i] == '9' {
+				t[i] = '0'
+			} else {
+				t[i] = t[i] + 1
+				carry = false
+			}
+		}
+		decimalPart = string(t)
+		t = []byte(integerPart)
+		for i := len(integerPart) - 1; i >= 0 && carry; i-- {
+			if t[i] == '9' {
+				t[i] = '0'
+			} else {
+				t[i] = t[i] + 1
+				carry = false
+			}
+		}
+		if carry {
+			integerPart = "1" + string(t)
+		} else {
+			integerPart = string(t)
+		}
+	}
+
+	xStr = integerPart + "." + decimalPart
+	if sign {
+		xStr = "-" + xStr
+	}
+	return xStr
+}
+
 type builtinFormatWithLocaleSig struct {
 	baseBuiltinFunc
 }
@@ -2952,12 +3043,7 @@ func (b *builtinFormatSig) Clone() builtinFunc {
 // evalString evals FORMAT(X,D).
 // See https://dev.mysql.com/doc/refman/5.7/en/string-functions.html#function_format
 func (b *builtinFormatSig) evalString(row types.Row) (string, bool, error) {
-	x, isNull, err := b.args[0].EvalString(b.ctx, row)
-	if isNull || err != nil {
-		return "", true, errors.Trace(err)
-	}
-
-	d, isNull, err := b.args[1].EvalString(b.ctx, row)
+	x, d, isNull, err := evalNumDecArgsForFormat(b, row)
 	if isNull || err != nil {
 		return "", true, errors.Trace(err)
 	}
