@@ -3045,11 +3045,11 @@ func (b *builtinFormatSig) Clone() builtinFunc {
 func (b *builtinFormatSig) evalString(row types.Row) (string, bool, error) {
 	x, d, isNull, err := evalNumDecArgsForFormat(b, row)
 	if isNull || err != nil {
-		return "", true, errors.Trace(err)
+		return "", isNull, errors.Trace(err)
 	}
 
 	formatString, err := mysql.GetLocaleFormatFunction("en_US")(x, d)
-	return formatString, err != nil, errors.Trace(err)
+	return formatString, false, errors.Trace(err)
 }
 
 type fromBase64FunctionClass struct {
